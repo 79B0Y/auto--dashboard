@@ -1,0 +1,162 @@
+
+# 多用户可视化 Dashboard 平台需求规格说明书  
+_版本：v1.0_  更新：2025-05-25
+
+---
+
+## 1. 项目背景
+- LinknLink 需要一个**可自定义、可扩展**的前端 Dashboard，用于展示 n8n 或其他服务写入 MongoDB 的数据。  
+- 目标用户包括终端客户、内部运维及开发人员，需支持**多租户隔离**、**移动端友好**与**低门槛配置**。  
+- 平台需提供 **REST API + WebSocket**，允许 n8n 自动化流程在写入数据后**即时更新**用户仪表盘。
+
+---
+
+## 2. 术语
+| 名称            | 说明 |
+|-----------------|------|
+| **卡片 (Card)** | Dashboard 上的最小显示单元，如 KPI 数字、折线图、表格等 |
+| **布局 (Layout)**| 卡片在栅格中的行列排布及尺寸 |
+| **配置文件 (Config)**| JSON 文档，定义 cards、layout、settings |
+| **API‑Key**      | 访问与操作 Dashboard 的唯一凭证，不暴露 userId |
+
+---
+
+## 3. 功能需求
+### 3.1 仪表盘展示
+1. 支持 **KPI、折线图、柱状图、饼图、表格、HTML** 等卡片类型。  
+2. 每张卡片独立为一个前后端子模块，可插件化热插拔。  
+3. 卡片尺寸预设：`small (1×1)`, `medium (2×1)`, `large (2×2)`。  
+4. Tailwind CSS + Grid 实现 **响应式布局**，手机、平板、桌面自适配。  
+
+### 3.2 拖拽编辑
+1. 用户可在前端进入“编辑模式”拖拽/缩放/新增/删除卡片。  
+2. 卡片配置面板可视化修改 `title/type/query/...`。  
+3. 点击“保存”后，通过 API‑Key 将最新配置 **PUT /api/config** 持久化。  
+4. 保存成功后服务器以 WebSocket **configUpdated** 事件推送热刷新。  
+
+### 3.3 多用户与配置隔离
+1. 每位用户拥有独立 `dashboard_configs` 文档（`userId` 唯一）。  
+2. 用户通过 **API‑Key** 鉴权，不需要账号密码。  
+3. 支持为同一 userId 生成/吊销多把 API‑Key。  
+
+### 3.4 自动化集成
+1. n8n 在数据入库 MongoDB 后，使用 API‑Key 调用：  
+   - `GET /api/config` 读取现有配置  
+   - `PATCH /api/config/cards` 增加或修改卡片  
+2. 无需前端人工操作即可自动生成仪表盘。  
+
+### 3.5 WebSocket 实时推送
+- 端点：`wss://<host>/ws?key=<APIKEY>`  
+- 事件：`configUpdated` → 前端重新拉取配置  
+- 后续可扩展 `metricUpdate` 等实时数据事件。  
+
+---
+
+## 4. 非功能需求
+| 分类 | 需求 |
+|------|------|
+| 性能 | 单节点支持 ≥ 500 并发 WebSocket，API RPS ≥ 300 |
+| 安全 | 全站 HTTPS/WSS；API‑Key ⻓度 ≥32 字节；IP+Key 速率限制 |
+| 可维护 | 代码分层：路由 / 控制器 / 模型 / 中间件；Swagger 自动文档 |
+| 可扩展 | 插件式卡片、主题皮肤、国际化、配置版本回滚 |
+| 高可用 | MongoDB ReplicaSet；Docker Compose 或 K8s 部署脚本 |
+
+---
+
+## 5. 系统架构
+\`\`\`text
+┌───────────┐   WebSocket    ┌─────────────┐
+│  Frontend │◄──────────────►│   ws.js     │
+│  React PWA│                └─────────────┘
+│(react-grid)│ REST /api     ▲
+└─────▲─────┘                │
+      │                      │
+      ▼                      │
+┌──────────────┐   Mongoose  │
+│  Express     │─────────────┘
+│  controllers │
+└─────▲────────┘
+      │
+      ▼
+┌────────────────┐
+│ MongoDB         │
+│ dashboard_configs│
+│ api_keys         │
+└────────────────┘
+\`\`\`
+
+---
+
+## 6. 数据模型（MongoDB）
+
+### 6.1 `api_keys`
+\`\`\`jsonc
+{{ "_id": "...", "apiKey": "...", "userId": "u1",
+  "status": "active", "createdAt": "..." }}
+\`\`\`
+
+### 6.2 `dashboard_configs`
+\`\`\`jsonc
+{{ "_id": "...", "userId": "u1",
+  "config": {{ "layout": [...], "cards":[...], "settings": {{...}} }},
+  "versions":[{{ "savedAt":"...", "config":{{...}} }}],
+  "createdAt":"...", "updatedAt":"..." }}
+\`\`\`
+
+---
+
+## 7. REST API
+
+| 方法 | 路径 | 描述 |
+|------|------|------|
+| GET | `/api/config?key=` | 获取配置 |
+| PUT | `/api/config?key=` | 覆盖配置 |
+| PATCH | `/api/config/cards?key=` | 更新 cards/layout |
+| POST | `/api/config/reset?key=` | 恢复默认配置 |
+
+---
+
+## 8. WebSocket 事件
+| 事件 | 载荷示例 |
+|------|----------|
+| configUpdated | \`{{"type":"configUpdated","updatedAt":"ISO8601"}}\` |
+
+---
+
+## 9. 安全设计
+1. API‑Key **唯一索引**，可禁用/轮换。  
+2. 写接口启用 **IP & Key 双速率限制**（例：60 req/min）。  
+3. CORS 白名单：前端域名、n8n 自动化服务器域名。  
+
+---
+
+## 10. 可扩展特性
+- **配置版本回滚**：提供 `/api/config/versions` + `/api/config/rollback/:id`  
+- **多仪表盘页面**：`config.pages[]` + 前端 Tab 切换  
+- **主题 / 国际化**：`settings.theme / language`  
+- **插件市场**：异步加载第三方卡片（micro‑frontend）  
+- **实时指标推送**：同一 WebSocket 新增 `type: metric`  
+
+---
+
+## 11. 里程碑
+
+| 阶段 | 目标 | 预计周期 |
+|------|------|----------|
+| M1   | API‑Key 鉴权 & 基础 REST (GET/PUT) | 1 周 |
+| M2   | 拖拽前端 + PATCH 更新            | 2 周 |
+| M3   | WebSocket 推送 + n8n 集成        | 1 周 |
+| M4   | 插件卡片 + 版本回滚 + 主题       | 2 周 |
+
+---
+
+## 12. 交付物
+1. **后端代码库**（Express + Mongoose + ws）  
+2. **前端 SPA**（React + Tailwind + react‑grid‑layout）  
+3. **Docker Compose**（MongoDB + 服务）  
+4. **在线 Swagger 文档** `/docs`  
+5. **部署说明 & 环境示例**  
+
+---
+
+_文档结束_
