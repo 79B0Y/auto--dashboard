@@ -56,11 +56,18 @@ router.post('/agg', async (req, res) => {
   const { collection, query, aggregation, field } = req.body;
   const col = mongoose.connection.db.collection(collection);
   const pipeline = [];
+
   if (query) pipeline.push({ $match: query });
-  if (aggregation === 'sum') pipeline.push({ $group: { _id: `$${field}`, value: { $sum: `$${field}` } } });
-  else if (aggregation === 'count') pipeline.push({ $count: 'value' });
+
+  if (aggregation === 'sum') {
+    pipeline.push({ $group: { _id: null, value: { $sum: `$${field}` } } });
+  } else if (aggregation === 'count') {
+    pipeline.push({ $count: 'value' });
+  }
+
   const result = await col.aggregate(pipeline).toArray();
   res.json({ value: result[0]?.value ?? 0 });
 });
+
 
 module.exports = router;
