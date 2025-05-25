@@ -1,0 +1,148 @@
+# Dashboard v6 – 框架总览
+
+<div align="right">2025‑05‑25</div>
+
+---
+
+## 1. 顶层架构
+
+```
+┌───────────┐      WebSocket (ws://…/ws?key=)
+│  Browser  │  ⇄  HTTP API (REST)
+└───────────┘          │
+        │              │ (Express)
+        ▼              ▼
+ ┌───────────┐   ┌─────────────┐
+ │  React    │   │  Node.js    │
+ │  (Vite)   │   │  Backend    │──▶ MongoDB 6
+ └───────────┘   └─────────────┘
+```
+
+* **前端**：React + Vite + Tailwind；构建产物由 Express 作为静态文件提供
+* **后端**：Node/Express 统一处理 REST、WebSocket 和静态资源
+* **数据库**：MongoDB（Docker 容器）持久化用户配置与业务数据
+
+---
+
+## 2. 目录 & 文件角色
+
+```
+ dashboard/
+ ├─ install.sh                # 一键构建脚本（docker compose up --build）
+ ├─ docker-compose.yml        # 定义 mongo 与 dashboard 两个服务
+ ├─ Dockerfile                # dashboard 服务镜像（先 build 前端再启动后端）
+ ├─ frontend/                 # React 单页应用
+ │  ├─ package.json           # 前端依赖 & script
+ │  ├─ vite.config.js         # Vite & 代理配置
+ │  ├─ postcss.config.js      # PostCSS 插件（Tailwind）
+ │  ├─ tailwind.config.js     # Tailwind 主题
+ │  └─ src/
+ │     ├─ index.html          # SPA 容器
+ │     ├─ main.jsx           
+ │     ├─ App.jsx            
+ │     ├─ components/
+ │     │    └─ CardRenderer.jsx # 渲染 KPI / HTML 卡片
+ │     ├─ pages/
+ │     │    ├─ Login.jsx      # 登录页（输入 API‑Key）
+ │     │    └─ Dashboard.jsx  # 主仪表盘
+ │     └─ index.css           # Tailwind 指令入口
+ └─ backend/
+    ├─ package.json           # 后端依赖
+    ├─ .env                   # MONGO_URI 等环境变量
+    └─ server/
+       ├─ index.js            # 启动 Express & WS
+       ├─ ws.js               # WebSocket Hub
+       ├─ routes/
+       │   └─ config.js       # /api/config/** 路由集合
+       └─ models/
+           ├─ ApiKey.js       # API Key Schema
+           └─ Config.js       # 仪表盘配置 Schema
+```
+
+### 文件/脚本用途速览
+
+| 文件                     | 作用                                                                                                           |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------ |
+| **install.sh**         | `docker compose up -d --build` 包装，简化安装                                                                       |
+| **Dockerfile**         | 构建 dashboard 镜像：<br>① `npm ci` (backend) → ② `npm ci && npm run build` (frontend) → ③ `node server/index.js` |
+| **docker-compose.yml** | orchestration：<br>`mongo` 暴露 27017 → `dashboard` 依赖 mongo，映射 3000                                            |
+| **npm install**        | 读 **package.json**，在 `node_modules` 写入依赖。前端/后端各自独立运行一次                                                       |
+| **vite build**         | 把 `frontend/src` 转译 + tree‑shake，输出 `frontend/dist` 静态资产                                                     |
+| **npm run dev**        | 本地调试 (`vite dev server`)，使用代理将 `/api` `/ws` 转发到 3000                                                         |
+
+---
+
+## 3. 关键时序图
+
+```mermaid
+sequenceDiagram
+    participant UI as Browser (React)
+    participant FE as React/Vite
+    participant API as Express API
+    participant DB as MongoDB
+    note over UI: 首次加载
+
+    UI->>FE: GET / (index.html)
+    FE-->>UI: HTML+JS (dist)
+    UI->>API: GET /api/config?key=K
+    API->>DB: findOne({userId})
+    DB-->>API: config JSON
+    API-->>UI: config JSON
+    loop 每张 KPI 卡片
+        UI->>API: POST /api/config/agg?key=K
+        API->>DB: aggregate(col, pipeline)
+        DB-->>API: {value}
+        API-->>UI: {value}
+    end
+    UI->>API: (拖拽/保存) PUT /api/config?key=K
+    API->>DB: updateOne(...), push version
+    API-->>UI: ok
+    API-->>UI: WS push {type:"configUpdated"}
+    UI->>API: GET /api/config?key=K  (热刷新)
+```
+
+---
+
+## 4. 安装 & 运行流程
+
+1. **下载并解压** 项目
+2. `./install.sh`
+
+   1. 拉取 `mongo:6` 镜像并启动 `mongo` 容器 (27017)
+   2. `docker build` dashboard：<br>    · 安装依赖 → build 前端 → 启动后端
+3. 浏览器访问 `http://localhost:3000/`，输入 API‑Key 登录
+4. 仪表盘加载 `/api/config` 并渲染
+5. 每 60s（或 WS 推送）刷新数据
+
+---
+
+## 5. 开发模式
+
+```bash
+# 前端
+cd frontend
+npm install             # 安装依赖
+npm run dev             # http://localhost:5173 (含代理)
+
+# 后端(单独运行)
+cd ../backend
+npm install
+npm run start           # nodemon / node server/index.js
+```
+
+> 代理在 `vite.config.js` 中配置，确保开发时 API 调用无需改域名。
+
+---
+
+## 6. 常见问题 & 解决
+
+| 症状                                          | 解决方案                                                                |
+| ------------------------------------------- | ------------------------------------------------------------------- |
+| `Cannot find module '@vitejs/plugin-react'` | `npm install --save-dev @vitejs/plugin-react`；确保未跳过 devDependencies |
+| `EACCES: permission denied`                 | `sudo chown -R $USER:$USER frontend`                                |
+| `Bind for 0.0.0.0:27017 failed`             | 修改 compose 端口映射：`27019:27017`                                       |
+
+---
+
+> **到这里为止，你已拥有一套可本地开发、Docker 部署的多用户仪表盘框架。**
+> 下一步可迭代：图表卡片、字段编辑器、OAuth 登录、导出 PDF、SaaS 多租户。
